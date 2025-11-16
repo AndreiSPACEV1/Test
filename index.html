@@ -1,14 +1,187 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Document</title>
-    <link rel="stylesheet" href="" />
-  </head>
-  <body>
-    <h1>Test1.1</h1>
-    <div>####</div>
-    <div>Test</div>
-  </body>
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8"/>
+  <title>Rate valutare (1 RON = ?)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    body { background:#0b0f14; color:#e7eef6; font-family:Arial, sans-serif; padding:18px;   display: flex; flex-direction: column; justify-content: center; align-content: center; align-items: center;}
+    h1 { margin:0 0 8px 0; font-size:20px; }
+    #rates { margin-top:12px; padding:12px; background:#0f1720; border-radius:8px; min-width:300px; max-width:780px; }
+    .item { padding:6px 8px; border-bottom:1px solid #162029; display:flex; justify-content:space-between;  }
+    .meta { font-size:12px; color:#97a6b3; margin-top:8px; }
+    .error { color:#ff9b9b; }
+    button { margin-left:6px; padding:6px 10px; cursor:pointer; border-radius:6px; border:0; background:#1f6feb; color:white; }
+    .left { font-weight:600; }
+    .right { color:#cfe7ff; }
+  </style>
+</head>
+<body>
+  <h1>Rate valutare live — 1 RON = ?</h1>
+
+  <div id="rates">
+    <div id="status">Se încarcă...</div>
+  </div>
+
+  <div class="meta">
+    Actualizare automată la 60s.
+    <button id="refreshBtn">Refresh</button>
+    Deschide consola (F12) pentru debug.
+  </div>
+
+  <script>
+    // lista ta de 20 monede
+    const currencies = [
+      "EUR","USD","GBP","JPY","AUD",
+      "CAD","CHF","CNY","SEK","NOK",
+      "DKK","PLN","HUF","BGN","CZK",
+      "TRY","BRL","INR","MXN","ZAR"
+    ];
+
+    const box = document.getElementById("rates");
+    const status = document.getElementById("status");
+    document.getElementById("refreshBtn").onclick = loadAll;
+
+    function setStatus(msg, cls="") {
+      status.innerHTML = `<div class="${cls}">${msg}</div>`;
+    }
+    function fmt(n){ return (typeof n === "number") ? n.toFixed(4) : "—"; }
+
+    // 1) încercare frankfurter: verifică mai întâi ce valute sunt suportate
+    async function tryFrankfurter() {
+      try {
+        const listResp = await fetch("https://api.frankfurter.dev/v1/currencies", { mode: 'cors', headers:{'Accept':'application/json'} });
+        console.log("Frankfurter currencies status:", listResp.status);
+        const listJson = await listResp.json();
+        console.log("Frankfurter currencies:", listJson);
+
+        // dacă RON este suportat, putem cere direct base=RON
+        if (listJson && listJson["RON"]) {
+          const symbols = currencies.join(",");
+          const url = `https://api.frankfurter.dev/v1/latest?base=RON&symbols=${symbols}`;
+          const res = await fetch(url, { mode: 'cors', headers:{'Accept':'application/json'} });
+          console.log("Frankfurter latest (base=RON) status:", res.status);
+          const data = await res.json();
+          console.log("Frankfurter latest data:", data);
+
+          if (data && data.rates && Object.keys(data.rates).length > 0) {
+            renderFromRates(data.date || new Date().toISOString(), data.rates, "Frankfurter (direct base=RON)");
+            return true;
+          } else {
+            console.warn("Frankfurter: rates lipsă pentru base=RON.");
+            return false;
+          }
+        } else {
+          console.warn("Frankfurter: RON nu este în lista de valute suportate.");
+          return false;
+        }
+      } catch (err) {
+        console.warn("Frankfurter failed:", err);
+        return false;
+      }
+    }
+
+    // 2) fallback Frankfurter: dacă RON nu poate fi baza, cere base=EUR și calculează 1RON
+    async function tryFrankfurterViaEUR() {
+      try {
+        const symbols = Array.from(new Set([...currencies, "RON"])).join(",");
+        const url = `https://api.frankfurter.dev/v1/latest?base=EUR&symbols=${symbols}`;
+        const res = await fetch(url, { mode: 'cors', headers:{'Accept':'application/json'} });
+        console.log("Frankfurter (base=EUR) status:", res.status);
+        const data = await res.json();
+        console.log("Frankfurter (base=EUR) data:", data);
+
+        if (data && data.rates && typeof data.rates["RON"] === "number") {
+          const eurToRon = data.rates["RON"]; // 1 EUR = eurToRon RON
+          const rates = {};
+          currencies.forEach(cur => {
+            const eurToCur = data.rates[cur];
+            if (typeof eurToCur === "number") {
+              // 1 RON = (1 / eurToRon) * eurToCur
+              rates[cur] = (1 / eurToRon) * eurToCur;
+            } else {
+              rates[cur] = undefined;
+            }
+          });
+          renderFromRates(data.date || new Date().toISOString(), rates, "Frankfurter (calc via EUR)");
+          return true;
+        } else {
+          console.warn("Frankfurter via EUR: RON lipsă sau invalid în răspuns.");
+          return false;
+        }
+      } catch (err) {
+        console.warn("Frankfurter via EUR failed:", err);
+        return false;
+      }
+    }
+
+    // 3) fallback final: exchangerate.host convert per-moneda (mai lent dar robust)
+    async function tryExchangeRateHostConvert() {
+      try {
+        const rates = {};
+        for (const cur of currencies) {
+          try {
+            const url = `https://api.exchangerate.host/convert?from=RON&to=${cur}&amount=1`;
+            const res = await fetch(url, { mode:'cors', headers:{'Accept':'application/json'} });
+            console.log(`exchangerate.host convert ${cur} status:`, res.status);
+            const data = await res.json();
+            console.log(`convert ${cur} →`, data);
+            if (data && (data.result !== undefined)) {
+              rates[cur] = Number(data.result);
+            } else if (data && data.info && data.info.rate) {
+              rates[cur] = Number(data.info.rate);
+            } else {
+              rates[cur] = undefined;
+            }
+          } catch (errInner) {
+            console.warn("convert failed for", cur, errInner);
+            rates[cur] = undefined;
+          }
+        }
+        renderFromRates(new Date().toISOString(), rates, "exchangerate.host (convert)");
+        return true;
+      } catch (err) {
+        console.warn("exchangerate.host fallback failed:", err);
+        return false;
+      }
+    }
+
+    // afișare finală
+    function renderFromRates(date, ratesObj, sourceLabel) {
+      const parts = [];
+      parts.push(`<div class="item"><div class="left">Actualizat:</div><div class="right">${date} — ${sourceLabel}</div></div>`);
+      currencies.forEach(cur => {
+        const v = ratesObj[cur];
+        parts.push(`<div class="item"><div class="left">${cur}</div><div class="right">1 RON = ${fmt(v)} ${cur}</div></div>`);
+      });
+      box.innerHTML = parts.join("");
+      setStatus(`Date afișate (sursa: ${sourceLabel})`);
+    }
+
+    // încercăm toate opțiunile în ordine
+    async function loadAll() {
+      setStatus("Încarcă cursuri...");
+      box.innerHTML = `<div id="status">Încarcă...</div>`;
+      // 1) frankfurter direct
+      const ok1 = await tryFrankfurter();
+      if (ok1) return;
+
+      // 2) frankfurter via EUR
+      const ok2 = await tryFrankfurterViaEUR();
+      if (ok2) return;
+
+      // 3) exchangerate.host convert per currency
+      const ok3 = await tryExchangeRateHostConvert();
+      if (ok3) return;
+
+      // dacă tot nu merge
+      box.innerHTML = `<div class="error">Nu am putut obține rate de la nicio sursă. Vezi consola pentru detalii.</div>`;
+      setStatus("Eroare — vezi consola (F12).", "error");
+    }
+
+    // pornire + interval update
+    loadAll();
+    setInterval(loadAll, 60000);
+  </script>
+</body>
 </html>
